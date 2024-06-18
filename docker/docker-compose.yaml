@@ -1,0 +1,20 @@
+# nvidia container boostup 
+version: "3"
+services:
+  qwen_agent:
+    image: "nvcr.io/nvidia/pytorch:24.04-py3"
+    container_name: "qwen_agent"
+    volumes:
+      - "../:/workspace"
+    command: /bin/bash -c "while true; do sleep 1000; done"
+    restart: always
+    network_mode: "host"
+    privileged: true
+    shm_size: "10g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
