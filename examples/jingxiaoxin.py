@@ -1,18 +1,22 @@
 import os
-import time
-import json5
 import pprint
-import urllib.parse
+import random
+import string
+import logging
+import datetime
+import speech_recognition as sr
 
 from typing import *
 from collections import deque
 from qwen_agent.agent import Agent
 from qwen_agent.agents import Assistant
 from qwen_agent.llm.schema import Message
-from qwen_agent.multi_agent_hub import MultiAgentHub
+
 from qwen_agent.gui.web_ui import *
-from AIDCM.frontend.audio_gradio.ali_stt import lingji_stt_st
+from speech_recognition import AudioData
+from qwen_agent.multi_agent_hub import MultiAgentHub
 from AIDCM.frontend.audio_gradio.zijie_tts import AudioProducer,AudioConsumer
+from AIDCM.frontend.audio_gradio.ali_stt import Recognition,Callback,lingji_stt_gradio,lingji_stt_gradio_va
 
 class myWebUI:
     """A Common chatbot application for agent."""
@@ -120,7 +124,7 @@ class myWebUI:
                         with gr.Column(scale=1):
                             submit = gr.Button(value="microphone")
                             submit.click(
-                                fn=lingji_stt_st,
+                                fn=lingji_stt_gradio,
                                 inputs=[input],
                                 outputs=[input]
                             ).then(
@@ -136,6 +140,14 @@ class myWebUI:
                                 self.flushed,
                                 None, 
                                 [input]  
+                            )
+
+                            tab = gr.Button("语音唤醒模式")
+                            tab.click(
+                                self.lingji_stt_gradio_voice_awake,
+                                inputs=[input, chatbot, history],
+                                outputs=[input, chatbot, history]
+
                             )
                             
                 # 侧边栏，设置右侧选择代理和插件的区域
@@ -411,7 +423,8 @@ class myWebUI:
                 choices=[],
                 interactive=False,
             )
-        
+    
+    # 异步TTS代码
     def producer_text(self, response:str=None):
         '''把模型的response放入到text队列中'''
         if response != None:
@@ -457,8 +470,7 @@ class myWebUI:
         else:
             # 当第二次点击microphone按钮时，表示录音停止，接下来需要做的就是等待音频生产者线程结束。
             self.producer_audio_thread_active = False
-            
-    
+               
     def consumer_audio_thread(self, _audio_queue: deque):
         '''
         使用AIDCM中的AudioConsumer类，创建一个消费者线程，用于播放音频。
@@ -474,14 +486,112 @@ class myWebUI:
             # 当第二次点击microphone按钮时，表示录音停止，接下来需要做的就是等待音频消费者线程结束。
             self.consumer_audio_thread_active = False
 
-
     def remove_first_match(self, s:str, sub_s:str):
         '''从s中删除第一次出现的sub_s'''
         if sub_s in s:
             return s.replace(sub_s, '', 1)
         else:
             return s
+
+    # 语音唤醒代码
+    def get_logger(self, ):
+        # 日志收集器
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
         
+        # 设置控制台处理器，当logger被调用时，控制台处理器额外输出被调用的位置。
+        # 创建一个控制台处理器并设置级别为DEBUG
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        # 创建一个格式化器，并设置格式包括文件名和行号
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(pathname)s:%(lineno)d - %(message)s')
+        ch.setFormatter(formatter)
+
+        # 将处理器添加到logger
+        logger.addHandler(ch)
+
+        return logger
+
+    def get_random_file_name(self, length=20, extension='.wav'):
+        '''create a random file name with current time'''
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d%H-%M-%S")
+        random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+        return f"{current_time}_{random_string}{extension}"
+
+    def save_audio_file(self, audio:AudioData, sample_rate=16000):
+        file_name = self.get_random_file_name()
+        with open(file_name, "wb") as f:
+            f.write(audio.get_wav_data(convert_rate=sample_rate))
+        return file_name
+
+    def recognize_speech(self, audio_path, recognizer:Recognition) ->str:
+        return recognizer.call(audio_path).get_sentence()[0]['text']
+
+    def lingji_stt_gradio_voice_awake(self, 
+                                      input_box:mgr.MultimodalInput,
+                                      chatbot:mgr.Chatbot,
+                                      history:list):
+        '''
+        语音唤醒模块
+        ---
+
+        input_box: modelscope_studio的MultimodalInput
+        chatbot:mgr.Chatbot[list[list[None, None]]] 对话机器人对象，用于存储和处理对话相关数据。
+        history: gr.State[list] 对话历史列表，用于记录用户的输入和机器人的回复。
+        '''
+        recognizer = sr.Recognizer()
+        logger = self.get_logger()
+
+        recognition= Recognition(
+                    model="paraformer-realtime-v1",            # 语音识别模型
+                    format='wav',                     # 音频格式
+                    sample_rate=16000,                # 指定音频的采样率，16000表示每秒采样16000次。
+                    callback=Callback()
+                    )
+        
+        with sr.Microphone() as source:
+            recognizer.adjust_for_ambient_noise(source, 1)          # 调整背景噪音
+            
+            while True:
+                try:
+                    # 一直监听语音
+                    logger.info("Listening for wake word 'hei siri'...")
+                    # audio = recognizer.listen(source)               # 监听麦克风
+                    logger.info("Recognizing done.")
+                    # audio_path = self.save_audio_file(audio)
+                    # result = self.recognize_speech(audio_path, recognizer=recognition)
+                    # os.remove(audio_path)
+                    # logger.info(f"Recognized: {result}")
+                    result = "123"
+
+                    # 当用户说出特定唤醒词时
+                    if "" in result:
+                        logger.info("Wake word detected!")
+
+                        # TODO: 给出固定的欢迎回复
+                        input_box.text = "你好！"
+                        _, chatbot, history = next(iter(self.add_text(
+                            _input=input_box,
+                            _chatbot=chatbot,
+                            _history=history
+                        )))
+
+                        # 实时语音识别
+                        input_box.text = lingji_stt_gradio_va()
+                        chatbot, history = next(iter(self.agent_run(
+                            _chatbot=chatbot,
+                            _history=history
+                        )))
+
+                        input_box = self.flushed()
+                        
+                        break
+                except sr.UnknownValueError:
+                    continue
+                except TypeError as e:
+                    continue
+            
+            return input_box, chatbot, history
 def llm_config():
     # 步骤 1：配置您所使用的 LLM。
     llm_cfg = {

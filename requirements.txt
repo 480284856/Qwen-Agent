@@ -26,3 +26,4 @@ sympy
 tiktoken
 uvicorn>=0.23.2
 pyaudio
+speechrecognition
