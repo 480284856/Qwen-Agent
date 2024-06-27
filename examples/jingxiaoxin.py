@@ -1,8 +1,10 @@
 import os
+import time
 import pprint
 import random
 import string
 import logging
+import threading
 import datetime
 import speech_recognition as sr
 
@@ -16,7 +18,8 @@ from qwen_agent.gui.web_ui import *
 from speech_recognition import AudioData
 from qwen_agent.multi_agent_hub import MultiAgentHub
 from AIDCM.frontend.audio_gradio.zijie_tts import AudioProducer,AudioConsumer
-from AIDCM.frontend.audio_gradio.ali_stt import Recognition,Callback,lingji_stt_gradio,lingji_stt_gradio_va
+from AIDCM.frontend.audio_gradio.ali_stt_voice_awake import lingji_stt_gradio_va
+from AIDCM.frontend.audio_gradio.ali_stt import Recognition,Callback,lingji_stt_gradio
 
 class myWebUI:
     """A Common chatbot application for agent."""
@@ -71,6 +74,8 @@ class myWebUI:
 
         self.producer_audio_thread_active = False     # 异步TTS：音频生产者线程是否激活
         self.consumer_audio_thread_active = False     # 异步TTS：音频消费者线程是否激活
+
+        self.locked = False                           # 语音唤醒：用于在大模型进行推理时，停止语音识别。
     """
     Run the chatbot.
 
@@ -100,118 +105,159 @@ class myWebUI:
                 css=os.path.join(os.path.dirname(__file__), 'assets/appBot.css'),   # CSS: 专注于Web显示效果优化
                 theme=customTheme,
         ) as demo:
-            history = gr.State([])                # 一直生效的历史记录
-            # 布局对话界面
-            with gr.Row(elem_classes='container'):
-                # 对话栏
-                with gr.Column(scale=4):          
-                    chatbot = mgr.Chatbot(
-                        value=convert_history_to_chatbot(messages=messages),
-                        avatar_images=[
-                            self.user_config,
-                            self.agent_config_list,
-                        ],
-                        height=None,              # 自适应高度。
-                        avatar_image_width=40,
-                        flushing=True,            # 更加流畅的流式对话，会一个个字地显示。
-                        flushing_speed=5,         # 流式输出速度。1～10.
-                        show_copy_button=False,   # 复制对话框中的内容，显示了不太好看
-                    )
-                    # 在聊天框下方，添加一个输入框和一个按钮，点击按钮，可以进行语音输入。
-                    with gr.Row(elem_classes='container'):
-                        with gr.Column(scale=9):
-                            input = mgr.MultimodalInput(placeholder=self.input_placeholder,)
-                        with gr.Column(scale=1):
-                            submit = gr.Button(value="microphone")
-                            submit.click(
-                                fn=lingji_stt_gradio,
+
+            with gr.Tab("语音交互模式"):
+                history = gr.State([])                # 一直生效的历史记录
+                # 布局对话界面
+                with gr.Row(elem_classes='container'):
+                    # 对话栏
+                    with gr.Column(scale=4):          
+                        chatbot = mgr.Chatbot(
+                            value=convert_history_to_chatbot(messages=messages),
+                            avatar_images=[
+                                self.user_config,
+                                self.agent_config_list,
+                            ],
+                            height=None,              # 自适应高度。
+                            avatar_image_width=40,
+                            flushing=True,            # 更加流畅的流式对话，会一个个字地显示。
+                            flushing_speed=5,         # 流式输出速度。1～10.
+                            show_copy_button=False,   # 复制对话框中的内容，显示了不太好看
+                        )
+                        # 在聊天框下方，添加一个输入框和一个按钮，点击按钮，可以进行语音输入。
+                        with gr.Row(elem_classes='container'):
+                            with gr.Column(scale=9):
+                                input = mgr.MultimodalInput(placeholder=self.input_placeholder,)
+                            with gr.Column(scale=1):
+                                submit = gr.Button(value="microphone")
+                                submit.click(
+                                    fn=lingji_stt_gradio,
+                                    inputs=[input],
+                                    outputs=[input]
+                                ).then(
+                                    fn=self.add_text,
+                                    inputs=[input, chatbot, history],
+                                    outputs=[input, chatbot, history],
+                                    queue=False
+                                ).then(
+                                    self.agent_run,
+                                    [chatbot, history],
+                                    [chatbot, history],
+                                ).then(   
+                                    self.flushed,
+                                    None, 
+                                    [input]  
+                                )
+                                
+                    # 侧边栏，设置右侧选择代理和插件的区域
+                    with gr.Column(scale=1):          
+                        if len(self.agent_list) > 1:  # 当存在多个代理时，添加代理选择下拉列表
+                            agent_selector = gr.Dropdown(
+                                [(agent.name, i) for i, agent in enumerate(self.agent_list)],
+                                label='Agents',
+                                info='选择一个Agent',
+                                value=0,
+                                interactive=True,
+                            )
+
+                        # 创建Agent信息块
+                        agent_info_block = self._create_agent_info_block()        
+                        # 创建代理插件展示块
+                        agent_plugins_block = self._create_agent_plugins_block()  
+
+                        if self.prompt_suggestions:
+                            gr.Examples(
+                                label='推荐对话',
+                                examples=self.prompt_suggestions,
                                 inputs=[input],
-                                outputs=[input]
-                            ).then(
-                                fn=self.add_text,
-                                inputs=[input, chatbot, history],
-                                outputs=[input, chatbot, history],
-                                queue=False
-                            ).then(
-                                self.agent_run,
-                                [chatbot, history],
-                                [chatbot, history],
-                            ).then(   
-                                self.flushed,
-                                None, 
-                                [input]  
                             )
 
-                            tab = gr.Button("语音唤醒模式")
-                            tab.click(
-                                self.lingji_stt_gradio_voice_awake,
-                                inputs=[input, chatbot, history],
-                                outputs=[input, chatbot, history]
+                    # 当agent选择发生变动时，更新agent的配置
+                    if len(self.agent_list) > 1:
+                        agent_selector.change(
+                            fn=self.change_agent,
+                            inputs=[agent_selector],
+                            outputs=[agent_selector, agent_info_block, agent_plugins_block],
+                            queue=False,
+                        )
 
-                            )
+                    # 当用户点击提交时，执行add_text函数。
+                    input_promise = input.submit(            # 当用户点击提交,或者是在输入后按下回车时,触发这个函数.
+                        fn=self.add_text,
+                        inputs=[input, chatbot, history],
+                        outputs=[input, chatbot, history],   # 把函数的返回结果赋值给哪些变量.
+                        queue=False,                         # If True, will place the request on the queue, if the queue has been enabled. If False, will not put this event on the queue, even if the queue has been enabled. If None, will use the queue setting of the gradio app.
+                    )
+
+                    if len(self.agent_list) > 1 and enable_mention:
+                        input_promise = input_promise.then(
+                            self.add_mention,
+                            [chatbot, agent_selector],
+                            [chatbot, agent_selector],
+                        ).then(
+                            self.agent_run,
+                            [chatbot, history, agent_selector],
+                            [chatbot, history, agent_selector],
+                        )
+                    else:
+                        # 在submit函数运行完成后,运行agent_run函数
+                        # 相当于: input.submit().then(agent_run)
+                        input_promise = input_promise.then(
+                            self.agent_run,
+                            [chatbot, history],
+                            [chatbot, history],
+                        )
+
+                    # 在agent_run函数运行完成后,运行flushed函数
+                    # 该函数会解锁输入框,把其锁定状态设置为False
+                    input_promise.then(self.flushed, None, [input])
+
+            with gr.Tab("语音唤醒模式"):
+                history = gr.State([])                # 一直生效的历史记录
+                # 布局对话界面
+                with gr.Row(elem_classes='container'):
+                    # 对话栏
+                    with gr.Column():          
+                        chatbot = mgr.Chatbot(
+                            value=convert_history_to_chatbot(messages=messages),
+                            avatar_images=[
+                                self.user_config,
+                                self.agent_config_list,
+                            ],
+                            height=None,              # 自适应高度。
+                            avatar_image_width=40,
+                            flushing=True,            # 更加流畅的流式对话，会一个个字地显示。
+                            flushing_speed=5,         # 流式输出速度。1～10.
+                            show_copy_button=False,   # 复制对话框中的内容，显示了不太好看
+                        )
+                        # 在聊天框下方，添加一个输入框和一个按钮，点击按钮，可以进行语音输入。
+                        with gr.Row(elem_classes='container'):
+                            with gr.Column(scale=9):
+                                input_box = mgr.MultimodalInput(placeholder=self.input_placeholder,)
+                            with gr.Column(scale=1):
+                                button = gr.Button("语音唤醒模式")
+                                button.click(
+                                    self.lingji_stt_gradio_voice_awake,
+                                    inputs=[input, chatbot, history],
+                                    outputs=[input]
+                                )
                             
-                # 侧边栏，设置右侧选择代理和插件的区域
-                with gr.Column(scale=1):          
-                    if len(self.agent_list) > 1:  # 当存在多个代理时，添加代理选择下拉列表
-                        agent_selector = gr.Dropdown(
-                            [(agent.name, i) for i, agent in enumerate(self.agent_list)],
-                            label='Agents',
-                            info='选择一个Agent',
-                            value=0,
-                            interactive=True,
-                        )
-
-                    # 创建Agent信息块
-                    agent_info_block = self._create_agent_info_block()        
-                    # 创建代理插件展示块
-                    agent_plugins_block = self._create_agent_plugins_block()  
-
-                    if self.prompt_suggestions:
-                        gr.Examples(
-                            label='推荐对话',
-                            examples=self.prompt_suggestions,
-                            inputs=[input],
-                        )
-
-                # 当agent选择发生变动时，更新agent的配置
-                if len(self.agent_list) > 1:
-                    agent_selector.change(
-                        fn=self.change_agent,
-                        inputs=[agent_selector],
-                        outputs=[agent_selector, agent_info_block, agent_plugins_block],
-                        queue=False,
-                    )
-
-                # 当用户点击提交时，执行add_text函数。
-                input_promise = input.submit(            # 当用户点击提交,或者是在输入后按下回车时,触发这个函数.
-                    fn=self.add_text,
-                    inputs=[input, chatbot, history],
-                    outputs=[input, chatbot, history],   # 把函数的返回结果赋值给哪些变量.
-                    queue=False,                         # If True, will place the request on the queue, if the queue has been enabled. If False, will not put this event on the queue, even if the queue has been enabled. If None, will use the queue setting of the gradio app.
-                )
-
-                if len(self.agent_list) > 1 and enable_mention:
-                    input_promise = input_promise.then(
-                        self.add_mention,
-                        [chatbot, agent_selector],
-                        [chatbot, agent_selector],
-                    ).then(
-                        self.agent_run,
-                        [chatbot, history, agent_selector],
-                        [chatbot, history, agent_selector],
-                    )
-                else:
-                    # 在submit函数运行完成后,运行agent_run函数
-                    # 相当于: input.submit().then(agent_run)
-                    input_promise = input_promise.then(
-                        self.agent_run,
-                        [chatbot, history],
-                        [chatbot, history],
-                    )
-
-                # 在agent_run函数运行完成后,运行flushed函数
-                # 该函数会解锁输入框,把其锁定状态设置为False
-                input_promise.then(self.flushed, None, [input])
+                            # 设置好，当文本输入框的内容改变时，自动进行推理。
+                            input_box.change(
+                                fn=self.add_text,
+                                inputs=[input_box, chatbot, history],
+                                outputs=[input_box, chatbot, history],
+                                queue=False,
+                                trigger_mode='once',
+                            ).then(
+                                fn=self.agent_run_va,
+                                inputs=[chatbot,history],
+                                outputs=[chatbot,history],
+                            ).then(
+                                fn=self.flushed,
+                                inputs=None,
+                                outputs=[input_box]
+                            )
 
             # 这个方法允许你在 Blocks 组件加载时运行一个函数，并将其输出用于初始化界面上的组件。
             # 但传入None, 应该是没有什么作用的,所以可以注释掉.
@@ -371,9 +417,98 @@ class myWebUI:
             del _history[-1]
             yield _chatbot, _history
 
+    def agent_run_va(self, _chatbot, _history, _agent_selector=None):
+        """
+        控制代理运行的函数。
+
+        - param _chatbot:mgr.Chatbot[list[list[None, None]]] 会话历史记录的列表，每个元素是一个二元组.
+        - param _history:gr.State[list] 用于代理决策的历史消息列表。
+        - param _agent_selector: 用于选择下一个代理的函数，如果为None，则默认选择第一个代理。
+        - yield: 在每个代理运行后生成聊天机器人状态、历史和当前选择的代理索引。
+        """
+        # 当input_box的内容变成None时，会再次走一次.change的流程，此时用户的输入是None，需要截断。
+        if _chatbot[-1][0] and _chatbot[-1][0].text:
+            # 先启动音频生产者和消费者线程，这样就可以达到监听的效果。
+            # 需要放在if语句下，因为当input_box的内容变成None时，即再次进入这个函数时，这两个线程会被重新开启。
+            # 等到第二次交互时，还没等语音播报开启，就会执行“self.producer_audio_thread_active = False”
+            self.producer_audio_thread(self.text_queue, self.audio_queue)
+            self.consumer_audio_thread(self.audio_queue)
+
+            # 如果设置为详细模式，则输出函数输入信息
+            if self.verbose:
+                logger.info('agent_run input:\n' + pprint.pformat(_history, indent=2))
+
+            last_response_text = None
+            _chatbot[-1][1] = [None for _ in range(len(self.agent_list))]
+
+            agent_runner = self.agent_list[_agent_selector or 0]   # 返回第_agent_selector个agent或者是第0个
+            if self.agent_hub:
+                agent_runner = self.agent_hub
+            response = []
+            for response in agent_runner.run(_history, **self.run_kwargs):  # 大模型推理结果: [{'role': 'assistant', 'content': '你好'}]
+                if not response:
+                    continue
+                display_response = convert_fncall_to_text(response)         # [{'role': 'assistant', 'content': '你好', 'name': None}]
+
+                if display_response is None or len(display_response) == 0:
+                    continue
+
+                agent_name, response_text = (
+                    display_response[-1][NAME],
+                    display_response[-1][CONTENT],
+                )
+                if response_text is None:
+                    continue
+                elif response_text == PENDING_USER_INPUT:                  # 表示接下来应该是用户的输入.
+                    logger.info('Interrupted. Waiting for user input!')
+                    continue
+
+                # TODO: Remove this `are_similar_enough`. This hack is not smart.
+                if last_response_text is not None and not are_similar_enough(last_response_text, response_text):  # 如果响应文本和上一次响应文本不相似，则添加一个空消息到聊天机器人中。
+                    _chatbot.append([None, None])
+                    _chatbot[-1][1] = [None for _ in range(len(self.agent_list))]
+
+                # 更新聊天机器人的代理响应列表
+                agent_index = self._get_agent_index_by_name(agent_name)
+                _chatbot[-1][1][agent_index] = response_text
+                last_response_text = response_text
+
+                if len(self.agent_list) > 1:
+                    _agent_selector = agent_index
+
+                # 根据_agent_selector是否存在，决定是否生成带索引的yield输出
+                # 在yield出去的时候,chatbot对象会被更新,所以yield执行之后,Web界面才会更新.
+                if _agent_selector is not None:
+                    yield _chatbot, _history, _agent_selector
+                else:
+                    stream_response:str = _chatbot[-1][-1][0]  # 大模型的当前时刻的推理结果
+                    self.producer_text(stream_response)
+                    yield _chatbot, _history
+            if response:
+                _history.extend([res for res in response if res[CONTENT] != PENDING_USER_INPUT])
+
+            if _agent_selector is not None:
+                yield _chatbot, _history, _agent_selector
+            else:                
+                yield _chatbot, _history
+
+            if self.verbose:
+                logger.info('agent_run response:\n' + pprint.pformat(response, indent=2))
+            self.producer_text(None)  # 推理完成后，在队列中加入None表示推理完成
+
+            self.producer_audio_thread_active = False
+            self.consumer_audio_thread_active = False
+            self._producer_audio_thread.join()
+            self._consumer_audio_thread.join()
+            self.old_total_response = ''
+        else:
+            del _chatbot[-1]
+            del _history[-1]
+            yield _chatbot, _history
+
     def flushed(self):
         from qwen_agent.gui.gradio import gr
-
+        self.locked = False  # 一次推理结束，可以再次进行语音识别了。
         return gr.update(interactive=True)
 
     def _get_agent_index_by_name(self, agent_name):
@@ -459,7 +594,6 @@ class myWebUI:
         '''
         使用AIDCM中的AudioProducer类，创建一个生产者线程，用于将文本转换为音频。
         '''
-        print("producer_audio_thread is called")
         # 维护一个self.producer_audio_thread_active变量，用于判断生产者线程是否已经启动。
         ## 如果self.producer_audio_thread_active为True，则表示生产者线程已经启动，否则表示生产者线程尚未启动。
         ## self.producer_audio_thread_active默认为False，在第一次点击microphone按钮时，我们可以把其设置为True，表示开始生产者线程。
@@ -541,13 +675,6 @@ class myWebUI:
         '''
         recognizer = sr.Recognizer()
         logger = self.get_logger()
-
-        recognition= Recognition(
-                    model="paraformer-realtime-v1",            # 语音识别模型
-                    format='wav',                     # 音频格式
-                    sample_rate=16000,                # 指定音频的采样率，16000表示每秒采样16000次。
-                    callback=Callback()
-                    )
         
         with sr.Microphone() as source:
             recognizer.adjust_for_ambient_noise(source, 1)          # 调整背景噪音
@@ -569,23 +696,20 @@ class myWebUI:
                         logger.info("Wake word detected!")
 
                         # TODO: 给出固定的欢迎回复
-                        input_box.text = "你好！"
-                        _, chatbot, history = next(iter(self.add_text(
-                            _input=input_box,
-                            _chatbot=chatbot,
-                            _history=history
-                        )))
+
 
                         # 实时语音识别
-                        input_box.text = lingji_stt_gradio_va()
-                        chatbot, history = next(iter(self.agent_run(
-                            _chatbot=chatbot,
-                            _history=history
-                        )))
-
-                        input_box = self.flushed()
+                        while True:
+                            if self.locked:
+                                time.sleep(0.1)
+                                print("大模型正在推理中，语音识别暂停。。。")
+                                continue
+                            else:
+                                self.locked = True
+                                print("大模型推理结束，语音识别恢复。。。")
+                                yield lingji_stt_gradio_va()
                         
-                        break
+                        # break
                 except sr.UnknownValueError:
                     continue
                 except TypeError as e:
