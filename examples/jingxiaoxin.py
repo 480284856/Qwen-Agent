@@ -238,8 +238,8 @@ class myWebUI:
                                 button = gr.Button("语音唤醒模式")
                                 button.click(
                                     self.lingji_stt_gradio_voice_awake,
-                                    inputs=[input, chatbot, history],
-                                    outputs=[input]
+                                    inputs=[input_box, chatbot, history],
+                                    outputs=[input_box]
                                 )
                             
                             # 设置好，当文本输入框的内容改变时，自动进行推理。
