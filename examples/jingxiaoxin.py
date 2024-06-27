@@ -674,48 +674,48 @@ class myWebUI:
         history: gr.State[list] 对话历史列表，用于记录用户的输入和机器人的回复。
         '''
         recognizer = sr.Recognizer()
-        logger = self.get_logger()
-        
+        # 麦克风准备
         with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source, 1)          # 调整背景噪音
+            recognizer.adjust_for_ambient_noise(source, 1)            # 调整背景噪音
             
             while True:
                 try:
-                    # 一直监听语音
-                    logger.info("Listening for wake word 'hei siri'...")
-                    # audio = recognizer.listen(source)               # 监听麦克风
-                    logger.info("Recognizing done.")
+                    '''一直监听语音'''
+                    # logger.info("Listening for wake word 'hei siri'...")
+                    # audio = recognizer.listen(source)                 # 监听麦克风
+                    # logger.info("Recognizing done.")
                     # audio_path = self.save_audio_file(audio)
                     # result = self.recognize_speech(audio_path, recognizer=recognition)
                     # os.remove(audio_path)
                     # logger.info(f"Recognized: {result}")
-                    result = "123"
+                    
+                    result = ""
 
-                    # 当用户说出特定唤醒词时
+                    '''当用户说出特定唤醒词时'''
                     if "" in result:
                         logger.info("Wake word detected!")
 
-                        # TODO: 给出固定的欢迎回复
+                        '''TODO: 给出固定的欢迎回复'''
+                        # play_welcome_audio()
 
-
-                        # 实时语音识别
+                        '''开始语音交互工作流'''
                         while True:
                             if self.locked:
                                 time.sleep(0.1)
-                                print("大模型正在推理中，语音识别暂停。。。")
+                                logger.info("大模型正在推理中，语音识别暂停。。。")
                                 continue
                             else:
                                 self.locked = True
-                                print("大模型推理结束，语音识别恢复。。。")
-                                yield lingji_stt_gradio_va()
+                                logger.info("大模型推理结束，开始驱动语音交互工作流。。。")
+                                yield lingji_stt_gradio_va()          # 这里只是驱动，用于发送用户的输入，并不是整个工作流的实现
                         
-                        # break
-                except sr.UnknownValueError:
+                except sr.UnknownValueError as e:
+                    logger.error(e)
                     continue
                 except TypeError as e:
+                    logger.error(e)
                     continue
             
-            return input_box, chatbot, history
 def llm_config():
     # 步骤 1：配置您所使用的 LLM。
     llm_cfg = {
