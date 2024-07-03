@@ -76,7 +76,7 @@ class Memory(Agent):
             The message of retrieved documents.
         """
         # process files in messages
-        rag_files = self.get_rag_files(messages)
+        rag_files = self.get_rag_files(messages)  # 获取历史上传的所有文件，以及当前会话的文件。
 
         if not rag_files:
             yield [Message(role=ASSISTANT, content='', name='memory')]

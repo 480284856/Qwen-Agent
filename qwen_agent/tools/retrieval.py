@@ -28,8 +28,8 @@ class Retrieval(BaseTool):
 
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
-        self.max_ref_token: int = self.cfg.get('max_ref_token', DEFAULT_MAX_REF_TOKEN)
-        self.parser_page_size: int = self.cfg.get('parser_page_size', DEFAULT_PARSER_PAGE_SIZE)
+        self.max_ref_token: int = self.cfg.get('max_ref_token', DEFAULT_MAX_REF_TOKEN)           # 最大可索引token数
+        self.parser_page_size: int = self.cfg.get('parser_page_size', DEFAULT_PARSER_PAGE_SIZE)  # 文档切分时，chunk的大小
         self.doc_parse = DocParser({'max_ref_token': self.max_ref_token, 'parser_page_size': self.parser_page_size})
 
         self.rag_searchers = self.cfg.get('rag_searchers', DEFAULT_RAG_SEARCHERS)
@@ -55,11 +55,15 @@ class Retrieval(BaseTool):
         files = params.get('files', [])
         if isinstance(files, str):
             files = json5.loads(files)
+
+        '''向量数据库的构建'''
+        "得到file对应的chunks"
         records = []
         for file in files:
             _record = self.doc_parse.call(params={'url': file}, **kwargs)
             records.append(_record)
 
+        '''搜索相关的chunks'''
         query = params.get('query', '')
         if records:
             return self.search.call(params={'query': query}, docs=[Record(**rec) for rec in records], **kwargs)
